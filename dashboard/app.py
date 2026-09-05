@@ -168,6 +168,19 @@ def sus_start():
     return jsonify(result), code
 
 
+@app.post("/api/experimento/publicar")
+def experimento_publicar():
+    """Manual publish: passthrough to ms-cotizacion POST /publicar."""
+    body = request.get_json(silent=True) or {}
+    try:
+        response = requests.post(f"{COTIZACION_URL}/publicar",
+                                 json=body, timeout=60)
+        return jsonify(response.json()), response.status_code
+    except Exception as exc:
+        logger.error("manual publish failed: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 502
+
+
 # ------------------------------------------------------------ orchestrator
 class ExperimentRunner(threading.Thread):
     """Runs: stop -> publish n -> poll depth -> start -> drain -> report."""
