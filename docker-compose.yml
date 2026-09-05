@@ -40,7 +40,7 @@ services:
     build: ./dashboard
     container_name: dashboard
     ports:
-      - "5000:5000"
+      - "8080:5000"
     environment:
       - RABBITMQ_HOST=rabbitmq
       - COTIZACION_URL=http://ms-cotizacion:5001
