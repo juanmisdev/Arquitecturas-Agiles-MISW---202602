@@ -1,0 +1,62 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  ms-cotizacion:
+    build: ./ms-cotizacion
+    container_name: ms-cotizacion
+    ports:
+      - "5001:5001"
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  ms-suscripcion:
+    build: ./ms-suscripcion
+    container_name: ms-suscripcion
+    ports:
+      - "5002:5002"
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+    volumes:
+      - suscripcion-data:/data
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  dashboard:
+    build: ./dashboard
+    container_name: dashboard
+    ports:
+      - "5000:5000"
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - COTIZACION_URL=http://ms-cotizacion:5001
+      - SUSCRIPCION_URL=http://ms-suscripcion:5002
+      - DB_PATH=/data/events.db
+      - DOCKER_SOCKET=/var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - suscripcion-data:/data
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      ms-cotizacion:
+        condition: service_started
+      ms-suscripcion:
+        condition: service_started
+
+volumes:
+  suscripcion-data:
