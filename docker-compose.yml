@@ -32,6 +32,7 @@ services:
       - "5002:5002"
     environment:
       - RABBITMQ_HOST=rabbitmq
+      - CONSUMER_DELAY=0.5
     volumes:
       - suscripcion-data:/data
     depends_on:
@@ -47,6 +48,7 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - COTIZACION_URL=http://ms-cotizacion:5001
       - SUSCRIPCION_URL=http://ms-suscripcion:5002
+      - PAUSE_ENTRE_PUBLICACIONES=0.8
       - DB_PATH=/data/eventos_suscripcion.db
       - DOCKER_SOCKET=/var/run/docker.sock
     volumes:

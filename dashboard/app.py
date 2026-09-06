@@ -169,6 +169,12 @@ def experimento_publicar():
         return jsonify({"ok": False, "error": "n debe ser 1..10000"}), 400
     tipos = ["auto", "hogar", "vida", "salud"]
     errores = []
+    # Pausa entre publicaciones (segundos): hace visible el flujo en el dashboard.
+    # Env PAUSE_ENTRE_PUBLICACIONES, defecto 0.0.
+    try:
+        pausa = float(os.environ.get("PAUSE_ENTRE_PUBLICACIONES", "0"))
+    except ValueError:
+        pausa = 0.0
     for i in range(n):
         payload = {
             "cliente_id": f"cliente-{i % 50}",
@@ -184,6 +190,8 @@ def experimento_publicar():
         except Exception as exc:
             logger.error("manual publish failed: %s", exc)
             errores.append(str(exc))
+        if pausa > 0 and i < n - 1:
+            time.sleep(pausa)
     if errores:
         return jsonify({"ok": False, "error": errores[0],
                         "fallos": len(errores), "publicadas": n - len(errores)}), 502
@@ -229,6 +237,10 @@ class ExperimentRunner(threading.Thread):
         self.state["phase"] = "publicando"
         baseline = self._processed_now()
         tipos = ["auto", "hogar", "vida", "salud"]
+        try:
+            pausa = float(os.environ.get("PAUSE_ENTRE_PUBLICACIONES", "0"))
+        except ValueError:
+            pausa = 0.0
         for i in range(n):
             payload = {
                 "cliente_id": f"cliente-{i % 50}",
@@ -239,6 +251,8 @@ class ExperimentRunner(threading.Thread):
             response = requests.post(f"{COTIZACION_URL}/cotizaciones",
                                      json=payload, timeout=10)
             response.raise_for_status()
+            if pausa > 0 and i < n - 1:
+                time.sleep(pausa)
         published = n
 
         self.state["phase"] = "acumulando"

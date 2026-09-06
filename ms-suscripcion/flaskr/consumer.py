@@ -20,6 +20,9 @@ from .models.models import EventoProcesado
 logger = logging.getLogger("consumer")
 
 RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "rabbitmq")
+# Pausa tras procesar cada evento (segundos): hace visible el drenaje en el
+# dashboard. Env CONSUMER_DELAY, defecto 0.0 (procesa a máxima velocidad).
+CONSUMER_DELAY = float(os.environ.get("CONSUMER_DELAY", "0"))
 
 # Contexto de app para usar db.session fuera del request cycle.
 # La app y el context se crean de forma diferida (lazy): el contenedor llama
@@ -116,6 +119,8 @@ class ConsumerThread(threading.Thread):
         channel.basic_ack(delivery_tag=method.delivery_tag)
         logger.info("Evento %s procesado (duplicados=%d)",
                     evento_id, self.eventos_duplicados)
+        if CONSUMER_DELAY > 0:
+            time.sleep(CONSUMER_DELAY)
 
     def stop(self):
         self._stop_requested.set()
