@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Experimento Broker — Cotización ↔ Suscripción</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <h1>Experimento Broker Interactivo</h1>
+    </div>
+    <div id="docker-badge" class="badge">modo: —</div>
+  </header>
+
+  <div id="manual-banner" class="banner hidden">
+    <strong>Fallback manual:</strong> Docker no está disponible desde el dashboard.
+    Ejecuta estos comandos en tu terminal:
+    <code id="manual-cmds">docker stop ms-suscripcion / docker start ms-suscripcion</code>
+    <button id="banner-dismiss" class="btn-mini" title="Cerrar">✕</button>
+  </div>
+
+  <main>
+    <section class="flow-panel">
+      <div class="node" id="node-cotizacion">
+        <div class="node-icon">📝</div>
+        <div class="node-name">Cotización</div>
+        <div class="node-counter" id="count-publicadas">--</div>
+        <div class="node-label">publicadas</div>
+      </div>
+
+      <div class="arrow-zone">
+        <div class="flow-track" id="track-1">
+          <div class="flow-line"></div>
+          <div class="dots" id="dots-1"></div>
+        </div>
+        <div class="arrow-caption">→</div>
+      </div>
+
+      <div class="node broker" id="node-broker">
+        <div class="node-icon">🐇</div>
+        <div class="node-name">Broker</div>
+        <div class="queue-visual">
+          <div class="queue-bar"><div class="queue-fill" id="queue-fill"></div></div>
+          <div class="queue-depth"><span id="count-cola">--</span> en cola</div>
+        </div>
+      </div>
+
+      <div class="arrow-zone">
+        <div class="flow-track" id="track-2">
+          <div class="flow-line"></div>
+          <div class="dots" id="dots-2"></div>
+        </div>
+        <div class="arrow-caption">→</div>
+      </div>
+
+      <div class="node" id="node-suscripcion">
+        <div class="node-icon">📥</div>
+        <div class="node-name">Suscripción</div>
+        <div class="node-counter" id="count-procesadas">--</div>
+        <div class="node-label">procesadas</div>
+        <div class="status-chip" id="status-suscripcion">estado: --</div>
+      </div>
+    </section>
+
+    <section class="controls-panel">
+      <div class="card experiment">
+        <h2>Experimento automático</h2>
+        <p class="hint">Detiene Suscripción, publica N cotizaciones asíncronas, verifica la cola,
+        reintegra y drena. Reporte final con garantías.</p>
+        <div class="row">
+          <label>N
+            <input type="number" id="input-n" value="100" min="1" max="10000">
+          </label>
+          <button id="btn-experimento" class="btn primary">Empezar experimento</button>
+        </div>
+        <div id="experiment-phase" class="phase hidden"></div>
+      </div>
+
+      <div class="card manual">
+        <h2>Controles manuales</h2>
+        <div class="row wrap">
+          <button id="btn-stop" class="btn danger">Detener Suscripción</button>
+          <button id="btn-start" class="btn success">Reiniciar Suscripción</button>
+        </div>
+        <div class="row">
+          <label>Publicar
+            <input type="number" id="input-publicar" value="10" min="1" max="10000">
+          </label>
+          <button id="btn-publicar" class="btn">Publicar N</button>
+        </div>
+        <div id="manual-feedback" class="feedback"></div>
+      </div>
+    </section>
+
+    <section class="counters-panel">
+      <div class="counter"><span class="c-label">Cotizaciones publicadas</span><span class="c-value" id="counter-publicadas">--</span></div>
+      <div class="counter"><span class="c-label">En cola</span><span class="c-value" id="counter-cola">--</span></div>
+      <div class="counter"><span class="c-label">Procesadas</span><span class="c-value" id="counter-procesadas">--</span></div>
+            <div class="counter warn"><span class="c-label">Duplicados</span><span class="c-value" id="counter-duplicados">--</span></div>
+    </section>
+  </main>
+
+  <!-- Reporte final -->
+  <div id="modal" class="modal-backdrop hidden">
+    <div class="modal">
+      <h2>Reporte final</h2>
+      <div id="report-body" class="report-body"></div>
+      <div id="report-verdict" class="report-verdict"></div>
+      <button id="btn-close-modal" class="btn primary">Cerrar</button>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
