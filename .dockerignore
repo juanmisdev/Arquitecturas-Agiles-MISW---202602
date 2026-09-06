@@ -2,4 +2,7 @@ tests/
 .venv/
 __pycache__/
 *.pyc
+.git/instance/
 .git/
+instance/
+instance/

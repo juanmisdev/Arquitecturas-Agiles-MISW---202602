@@ -3,25 +3,29 @@
 Experimento interactivo que demuestra que un broker de mensajería (RabbitMQ) **enmascara la falla** del microservicio Suscripción (HU ASR-DIS-02, disponibilidad ≤ 5 s):
 
 - Cuando Suscripción está **caído**, Cotización sigue operando y los eventos `cotizacion.creada` se **acumulan en una cola durable**.
-- Al **reintegrar** Suscripción, todos los eventos se procesan **en orden** y **sin pérdida de mensajes** (perdidos = 0).
+- Al **reintegrar** Suscripción, todos los eventos se procesan y **ningún evento se pierde** (perdidos = 0 por auditoría de `evento_id`).
 - Un **dashboard web** orquesta y observa toda la secuencia en vivo, impulsada por **estado real** (sin contadores simulados).
+
+> **Crédito base:** el microservicio Cotización está **basado en el MS de [@santigore](https://github.com/santigore) (cotizacion_ms)** siguiendo los tutoriales del curso (Flask + Flask-RESTful + Flask-SQLAlchemy + marshmallow, `CalculadoraPrima`, esquemas y endpoints originales). Sobre esa base se **completaron los pendientes**: publicación async en RabbitMQ vía pika, modo sync por REST hacia Suscripción, `GET /stats`, y el consumidor de Suscripción con idempotencia `EventoProcesado`.
 
 ## Arquitectura
 
 ```
 Navegador (index.html + app.js, poll 1s)
-     │ HTTP :5000
+     │ HTTP :5000 (host) / :8080 en docker compose
      ▼
   dashboard  ──── docker.sock ───► control real de ms-suscripcion (stop/start)
      │  │
      │  └── pika passive declare ───► rabbitmq (profundidad exacta de cola)
      │
-     ├── HTTP :5001 /stats ──► ms-cotizacion  (contador publicados)
-     └── HTTP :5002 /stats ──► ms-suscripcion (procesados + auditoría SQLite)
+     ├── HTTP :5001 /stats ────────► ms-cotizacion  (publicadas_async + por_estado)
+     └── HTTP :5002 /procesados ───► ms-suscripcion (procesados + duplicados + evento_ids)
 
-Cotización ──publica──► rabbitmq[cotizacion.creada, durable] ──prefetch=1, manual ack──► Suscripción
-                                                                                            │
-                                                                                     SQLite /data (WAL)
+  modo sync:   Cotización ──REST POST /suscripciones──► Suscripción
+  modo async:  Cotización ──publica──► rabbitmq[cotizacion.creada, durable]
+                                        └─prefetch=1, manual ack──► Suscripción
+                                                                     │
+                                              SQLite /data/eventos_suscripcion.db (EventoProcesado)
 ```
 
 Servicios:
@@ -29,9 +33,20 @@ Servicios:
 | Servicio | Puerto | Rol |
 |---|---|---|
 | `rabbitmq` | 5672 / 15672 | Broker (RabbitMQ 3 con management UI) |
-| `ms-cotizacion` | 5001 | Publica eventos `cotizacion.creada` con seq monotónico |
-| `ms-suscripcion` | 5002 | Consume con ack manual, prefetch=1 y persistencia SQLite |
-| `dashboard` | 5000 | Orquesta el experimento y agrega estado real |
+| `ms-cotizacion` | 5001 | Crea cotizaciones (Flask-RESTful + SQLAlchemy). modo=async publica en RabbitMQ; modo=sync llama a Suscripción por REST |
+| `ms-suscripcion` | 5002 | Consume la cola (ack manual, prefetch=1) con idempotencia `EventoProcesado`; recibe también modo sync |
+| `dashboard` | 5000 (host: 8080) | Orquesta el experimento y agrega estado real |
+
+### Endpoints
+
+| Servicio | Endpoint | Descripción |
+|---|---|---|
+| ms-cotizacion | `POST /cotizaciones` | Crea cotización + calcula prima. Body: `{cliente_id, tipo_seguro, valor_asegurado, modo: "sync"\|"async"}`. Async: publica evento `cotizacion.creada` y marca `estado=enviada` (o `error` con 201 si falla el broker). Sync: REST a Suscripción (timeout 3 s) |
+| ms-cotizacion | `GET /cotizaciones/<id>` | Consulta una cotización |
+| ms-cotizacion | `GET /stats` | `{publicadas_async, por_estado}` para el dashboard |
+| ms-suscripcion | `GET /procesados` | `{procesados, duplicados, evento_ids[últimos 200]}` |
+| ms-suscripcion | `POST /suscripciones` | Recepción modo sync (idempotente por `evento_id`/`cotizacion_id`) |
+| ambos | `GET /health` | Healthcheck |
 
 ## Prerequisitos
 
@@ -61,27 +76,31 @@ docker compose ps
 
 ## Ejecución automática (recomendada para demo)
 
-1. Abre http://localhost:5000.
+1. Abre http://localhost:8080.
 2. Deja N = 100 (configurable) y pulsa **“Empezar experimento”**.
-3. Observa las fases: detiene Suscripción → publica 100 eventos → los dots se **acumulan** en el Broker (profundidad de cola llega a 100, procesados 0) → reintegra Suscripción → la cola se **drena** → aparece el **reporte final**.
-4. El reporte muestra: procesados = 100, **perdidos = 0**, **en orden = Sí**, duplicados = 0.
+3. Observa las fases: detiene Suscripción → publica 100 cotizaciones async → los dots se **acumulan** en el Broker (profundidad de cola llega a 100, procesadas 0) → reintegra Suscripción → la cola se **drena** → aparece el **reporte final**.
+4. El reporte muestra (auditoría por `evento_id`): procesadas = 100, **perdidos = 0**, **duplicados = 0**.
 
 ## Ejecución manual (paso a paso)
 
 1. **Detener Suscripción**: botón “Detener Suscripción” (o `docker stop ms-suscripcion`).
-2. **Publicar**: en “Publicar N” escribe 100 y pulsa “Publicar N” (o `curl -X POST http://localhost:5001/publicar -H "Content-Type: application/json" -d '{"n":100}'`).
-3. Observa: *publicados* y *en cola* suben, *procesados* queda en 0, los dots se acumulan en el Broker. También puedes verlo en http://localhost:15672 (cola `cotizacion.creada`).
+2. **Publicar**: en “Publicar” escribe N y pulsa “Publicar N”. Crea N cotizaciones `modo=async` con `cliente_id`/`tipo_seguro`/`valor_asegurado` rotando (o manualmente: `curl -X POST http://localhost:5001/cotizaciones -H "Content-Type: application/json" -d '{"cliente_id":"c1","tipo_seguro":"auto","valor_asegurado":1000,"modo":"async"}'`).
+3. Observa: *Cotizaciones publicadas* y *En cola* suben, *Procesadas* queda en 0, los dots se acumulan en el Broker. También puedes verlo en http://localhost:15672 (cola `cotizacion.creada`).
 4. **Reintegrar**: botón “Reiniciar Suscripción” (o `docker start ms-suscripcion`).
-5. La cola drena a 0 y *procesados* llega a 100.
+5. La cola drena a 0 y *Procesadas* llega al total publicado.
+
+### Modo sync vs modo async
+
+- **async** (usado por el experimento): Cotización publica el evento `cotizacion.creada` en la cola durable y responde 201 con `estado=enviada`. Suscripción lo consume con ack manual; el INSERT en `EventoProcesado` (PK `evento_id`) va **antes** del ack (insert-then-ack), así que un crash entre ambos produce una reentrega **honesta** contada en `duplicados`.
+- **sync**: Cotización llama `POST http://ms-suscripcion:5002/suscripciones` (timeout 3 s). Si Suscripción responde, `estado=enviada`; si falla, `estado=error`. También 201 en ambos casos, con el estado informado.
 
 ## Cómo interpretar los resultados
 
 | Métrica | Significado | Valor esperado |
 |---|---|---|
-| **Perdidos** | Seqs publicados que no aparecen en SQLite (con ack manual, debe ser 0) | **0** |
-| **En orden** | Los seqs procesados (primeras apariciones) crecen monótonamente | **Sí** |
-| **Duplicados** | Seqs procesados más de una vez (reentrega tras crash mid-ack) | 0 (o ≥ 1 si se simula crash — se reporta honestamente) |
-| **Profundidad de cola** | `queue_declare(passive=True)` — exacta, sin lag del Management API | coincide con publicados mientras Suscripción está caído |
+| **Perdidos** (reporte final) | Eventos publicados que no aparecen en `EventoProcesado` (auditoría `evento_id`) | **0** |
+| **Duplicados** | INSERT rechazado por PK `evento_id` ya existente (reentrega o sync repetido); se cuenta aparte | 0 (o ≥ 1 tras crash mid-ack — se reporta honestamente) |
+| **Profundidad de cola** | `queue_declare(passive=True)` — exacta, sin lag del Management API | coincide con publicadas mientras Suscripción está caída |
 
 Cumplimiento de HU ASR-DIS-02: mientras Suscripción está caída, Cotización no se bloquea y ningún evento se pierde; la reintegración procesa todo el backlog en orden, evidenciando que el broker absorbe la falla.
 
@@ -89,7 +108,7 @@ Cumplimiento de HU ASR-DIS-02: mientras Suscripción está caída, Cotización n
 
 ### Docker socket no disponible desde el dashboard (Linux)
 
-El contenedor `dashboard` necesita permiso sobre `/var/run/docker.sock`. Si el badge muestra **“docker: manual”**:
+El contenedor `dashboard` necesita permiso sobre `/var/run/docker.sock`. Si el badge muestra **“docker: manual”** (dashboard en http://localhost:8080):
 
 - **Opción A (grupo docker del host):** monta el GID del grupo docker:
 
@@ -137,7 +156,7 @@ docker compose down -v   # elimina contenedores y el volumen de SQLite
 
 ```bash
 pip install -r requirements-dev.txt
-pytest            # unitarias (auditoría de seqs, publisher)
+pytest            # unitarias (idempotencia EventoProcesado, API cotización, broker publisher)
 pytest -m integration   # requiere RabbitMQ real: docker compose up rabbitmq
 ```
 

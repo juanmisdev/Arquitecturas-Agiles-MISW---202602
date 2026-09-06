@@ -25,30 +25,24 @@ async function pollEstado() {
 
 function renderEstado(estado) {
   // counters
-  setText("count-publicados", fmt(estado.published));
+  setText("count-publicadas", fmt(estado.publicadas));
   setText("count-cola", fmt(estado.queue_depth));
-  setText("count-procesados", fmt(estado.processed));
-  setText("counter-publicados", fmt(estado.published));
+  setText("count-procesadas", fmt(estado.procesadas));
+  setText("counter-publicadas", fmt(estado.publicadas));
   setText("counter-cola", fmt(estado.queue_depth));
-  setText("counter-procesados", fmt(estado.processed));
-  setText("counter-perdidos", estado.lost === null ? "--" : estado.lost);
-  setText("counter-duplicados", fmt(estado.duplicates));
-  setText(
-    "counter-orden",
-    estado.in_order === null || estado.in_order === undefined
-      ? "--"
-      : estado.in_order ? "Sí" : "No"
-  );
+  setText("counter-procesadas", fmt(estado.procesadas));
+  setText("counter-perdidos", "--");
+  setText("counter-duplicados", fmt(estado.duplicados));
 
   // queue fill (relative to published total, min 100 to normalize)
-  const denom = Math.max(estado.published || 0, lastPublished || 0, 100);
+  const denom = Math.max(estado.publicadas || 0, lastPublished || 0, 100);
   const pct = estado.queue_depth === null ? 0 : Math.min(100, (estado.queue_depth / denom) * 100);
   $("queue-fill").style.width = pct + "%";
 
   // animation dots: accumulate track1 while published > processed deltas;
   // track2 dots driven by drain delta (depth decrease).
-  renderDots("dots-1", estado.published, estado.queue_depth);
-  renderDots("dots-2", estado.queue_depth, estado.processed);
+  renderDots("dots-1", estado.publicadas, estado.queue_depth);
+  renderDots("dots-2", estado.queue_depth, estado.procesadas);
 
   // suscripcion node state
   const chip = $("status-suscripcion");
@@ -176,12 +170,11 @@ async function trackExperiment() {
 function showReport(report) {
   if (!report) return;
   const rows = [
-    ["Publicados", report.published],
-    ["Procesados", report.processed],
+    ["Cotizaciones publicadas", report.publicadas],
+    ["Procesadas", report.procesadas],
     ["En cola (restante)", report.queue_depth],
-    ["Perdidos", report.lost],
-    ["Duplicados", report.duplicates],
-    ["En orden", report.in_order === null ? "--" : report.in_order ? "Sí" : "No"],
+    ["Perdidos", report.perdidos],
+    ["Duplicados", report.duplicados],
   ];
   $("report-body").innerHTML = rows
     .map(
@@ -194,15 +187,15 @@ function showReport(report) {
   const ok = v.cero_perdidos && v.en_orden;
   $("report-verdict").innerHTML = `
     <div class="${v.cero_perdidos ? "verdict-ok" : "verdict-bad"}">
-      ${v.cero_perdidos ? "✓ Cero mensajes perdidos" : "✗ Se perdieron mensajes"}
+      ${v.cero_perdidos ? "✓ Cero eventos perdidos (auditoría evento_id)" : "✗ Se perdieron eventos"}
     </div>
     <div class="${v.en_orden ? "verdict-ok" : "verdict-bad"}">
       ${v.en_orden ? "✓ Procesados en orden" : "✗ Fuera de orden"}
     </div>
     <div class="${(report.duplicates || 0) === 0 ? "verdict-ok" : "verdict-bad"}">
-      ${(report.duplicates || 0) === 0
+      ${(report.duplicados || 0) === 0
         ? "✓ Sin duplicados"
-        : `⚠ ${report.duplicates} duplicado(s) detectado(s)`}
+        : `⚠ ${report.duplicados} duplicado(s) detectado(s)`}
     </div>`;
 
   $("modal").classList.remove("hidden");

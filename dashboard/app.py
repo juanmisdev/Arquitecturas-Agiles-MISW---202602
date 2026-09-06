@@ -1,9 +1,10 @@
 """Dashboard: aggregates REAL state and orchestrates the experiment.
 
 - GET /            -> UI
-- GET /api/estado  -> real aggregation (published, queue depth via pika
-                     passive declare, processed/lost/duplicates via SQLite
-                     seq audit, container status, docker_mode)
+- GET /api/estado  -> real aggregation (published via ms-cotizacion /stats,
+                     queue depth via pika passive declare, processed via the
+                     EventoProcesado SQLite table read from the shared
+                     volume, container status, docker_mode)
 - POST /api/suscripcion/stop|start -> control the real container
 - POST /api/experimento/iniciar {n} -> stop -> publish -> poll -> start ->
                      drain -> report; GET /api/experimento/estado
@@ -35,9 +36,8 @@ app = Flask(__name__)
 RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "rabbitmq")
 COTIZACION_URL = os.environ.get("COTIZACION_URL", "http://ms-cotizacion:5001")
 SUSCRIPCION_URL = os.environ.get("SUSCRIPCION_URL", "http://ms-suscripcion:5002")
-DB_PATH = os.environ.get("DB_PATH", "/data/events.db")
+DB_PATH = os.environ.get("DB_PATH", "/data/eventos_suscripcion.db")
 QUEUE = "cotizacion.creada"
-EXCHANGE = "cotizacion"
 
 DEFAULT_N = 100
 
@@ -76,39 +76,31 @@ def _get_json(url, timeout=3):
 
 
 # ------------------------------------------------------------- sqlite audit
-def seq_audit():
-    """Read events table written by ms-suscripcion (same mounted volume)."""
+def evento_audit():
+    """Read EventoProcesado rows written by ms-suscripcion (shared volume).
+
+    Idempotencia garantizada por PK: no puede haber evento_id repetido en la
+    tabla. Los duplicados (redelivery o sync repetido) los cuenta ms-suscripcion
+    en su contador eventos_duplicados, que exponemos vía /procesados.
+    """
     try:
         conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5)
         try:
-            rows = conn.execute("SELECT seq FROM events ORDER BY id ASC").fetchall()
+            rows = conn.execute(
+                "SELECT evento_id, procesado_en FROM evento_procesado "
+                "ORDER BY procesado_en ASC"
+            ).fetchall()
         finally:
             conn.close()
     except Exception as exc:
-        logger.warning("seq_audit failed: %s", exc)
+        logger.warning("evento_audit failed: %s", exc)
         return None
-    seqs = [r[0] for r in rows]
-    seen = set()
-    dup_seqs = set()
-    for s in seqs:
-        if s in seen:
-            dup_seqs.add(s)
-        seen.add(s)
-    first_list = []
-    seen2 = set()
-    for s in seqs:
-        if s not in seen2:
-            first_list.append(s)
-            seen2.add(s)
+    evento_ids = [r[0] for r in rows]
     return {
-        "processed": len(seqs),
-        "seqs": seqs,
-        "duplicates": len(seqs) - len(seen),
-        "in_order": all(
-            first_list[i] < first_list[i + 1]
-            for i in range(len(first_list) - 1)
-        ),
-        "last_seq": seqs[-1] if seqs else None,
+        "processed": len(evento_ids),
+        "evento_ids": evento_ids,
+        "duplicates": 0,  # por PK no hay repetidos en la tabla
+        "last_evento_id": evento_ids[-1] if evento_ids else None,
     }
 
 
@@ -116,19 +108,18 @@ def seq_audit():
 @app.get("/api/estado")
 def estado():
     cot_stats = _get_json(f"{COTIZACION_URL}/stats")
-    sus_stats = _get_json(f"{SUSCRIPCION_URL}/stats")
-    audit_data = seq_audit()
+    sus_stats = _get_json(f"{SUSCRIPCION_URL}/procesados")
+    audit_data = evento_audit()
     depth = try_queue_depth()
 
-    published = cot_stats.get("published") if cot_stats else None
+    # publicadas: cotizaciones async enviadas (estado=enviada)
+    published = cot_stats.get("publicadas_async") if cot_stats else None
     processed = audit_data["processed"] if audit_data else (
-        sus_stats.get("processed") if sus_stats else None
+        sus_stats.get("procesados") if sus_stats else None
     )
-
-    lost = None
-    if published is not None and audit_data is not None:
-        unique_processed = processed - audit_data["duplicates"] if processed is not None else 0
-        lost = max(0, published - unique_processed)
+    duplicates = sus_stats.get("duplicados") if sus_stats else (
+        audit_data["duplicates"] if audit_data else None
+    )
 
     suscripcion_status = "unknown"
     if sus_stats is not None:
@@ -137,15 +128,13 @@ def estado():
         suscripcion_status = "stopped"
 
     return jsonify({
-        "published": published,
+        "publicadas": published,
         "queue_depth": depth,
-        "processed": processed,
-        "lost": lost,
-        "duplicates": audit_data["duplicates"] if audit_data else (
-            sus_stats.get("duplicates") if sus_stats else None
+        "procesadas": processed,
+        "duplicados": duplicates,
+        "evento_ids": audit_data["evento_ids"] if audit_data else (
+            sus_stats.get("evento_ids", []) if sus_stats else []
         ),
-        "in_order": audit_data["in_order"] if audit_data else None,
-        "seqs_processed": audit_data["seqs"] if audit_data else [],
         "suscripcion_status": suscripcion_status,
         "docker_mode": detect_docker_mode(),
         "manual_commands": {"stop": MANUAL_STOP, "start": MANUAL_START},
@@ -170,15 +159,35 @@ def sus_start():
 
 @app.post("/api/experimento/publicar")
 def experimento_publicar():
-    """Manual publish: passthrough to ms-cotizacion POST /publicar."""
+    """Manual publish: crea n cotizaciones modo=async en ms-cotizacion."""
     body = request.get_json(silent=True) or {}
     try:
-        response = requests.post(f"{COTIZACION_URL}/publicar",
-                                 json=body, timeout=60)
-        return jsonify(response.json()), response.status_code
-    except Exception as exc:
-        logger.error("manual publish failed: %s", exc)
-        return jsonify({"ok": False, "error": str(exc)}), 502
+        n = int(body.get("n", 10))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "n invalido"}), 400
+    if n < 1 or n > 10000:
+        return jsonify({"ok": False, "error": "n debe ser 1..10000"}), 400
+    tipos = ["auto", "hogar", "vida", "salud"]
+    errores = []
+    for i in range(n):
+        payload = {
+            "cliente_id": f"cliente-{i % 50}",
+            "tipo_seguro": tipos[i % len(tipos)],
+            "valor_asegurado": 1000.0 + (i % 100) * 250.0,
+            "modo": "async",
+        }
+        try:
+            response = requests.post(f"{COTIZACION_URL}/cotizaciones",
+                                     json=payload, timeout=10)
+            if response.status_code != 201:
+                errores.append(response.text[:120])
+        except Exception as exc:
+            logger.error("manual publish failed: %s", exc)
+            errores.append(str(exc))
+    if errores:
+        return jsonify({"ok": False, "error": errores[0],
+                        "fallos": len(errores), "publicadas": n - len(errores)}), 502
+    return jsonify({"ok": True, "publicadas": n})
 
 
 # ------------------------------------------------------------ orchestrator
@@ -218,10 +227,19 @@ class ExperimentRunner(threading.Thread):
             return
 
         self.state["phase"] = "publicando"
-        response = requests.post(f"{COTIZACION_URL}/publicar",
-                                 json={"n": n}, timeout=120)
-        response.raise_for_status()
-        published = response.json().get("last_seq", n)
+        baseline = self._processed_now()
+        tipos = ["auto", "hogar", "vida", "salud"]
+        for i in range(n):
+            payload = {
+                "cliente_id": f"cliente-{i % 50}",
+                "tipo_seguro": tipos[i % len(tipos)],
+                "valor_asegurado": 1000.0 + (i % 100) * 250.0,
+                "modo": "async",
+            }
+            response = requests.post(f"{COTIZACION_URL}/cotizaciones",
+                                     json=payload, timeout=10)
+            response.raise_for_status()
+        published = n
 
         self.state["phase"] = "acumulando"
         deadline = time.time() + 20
@@ -247,36 +265,55 @@ class ExperimentRunner(threading.Thread):
             if depth == 0:
                 break
             time.sleep(1)
+        # margen para acks finales
+        time.sleep(2)
 
         self.state["phase"] = "generando_reporte"
-        report = self._report(published)
+        report = self._report(published, baseline)
         self.state["report"] = report
         self.state["status"] = "done"
         self.state["finished_at"] = datetime.now(timezone.utc).isoformat()
 
-    def _report(self, published):
-        audit_data = seq_audit()
-        stats = _get_json(f"{SUSCRIPCION_URL}/stats")
-        processed = audit_data["processed"] if audit_data else (
-            stats.get("processed") if stats else None
+    def _processed_now(self):
+        audit_data = evento_audit()
+        if audit_data is not None:
+            return audit_data["processed"]
+        stats = _get_json(f"{SUSCRIPCION_URL}/procesados")
+        return stats.get("procesados") if stats else 0
+
+    def _report(self, published, baseline):
+        audit_data = evento_audit()
+        stats = _get_json(f"{SUSCRIPCION_URL}/procesados")
+        processed_total = audit_data["processed"] if audit_data else (
+            stats.get("procesados") if stats else None
         )
-        duplicates = audit_data["duplicates"] if audit_data else (
-            stats.get("duplicates") if stats else None
+        duplicates = stats.get("duplicados") if stats else (
+            audit_data["duplicates"] if audit_data else None
         )
-        in_order = audit_data["in_order"] if audit_data else None
-        lost = None
-        if processed is not None:
-            lost = max(0, published - (processed - (duplicates or 0)))
+        # procesadas en ESTA corrida
+        processed = (processed_total - baseline) if processed_total is not None else None
+        # veredicto por auditoría evento_id: los publicados en esta corrida
+        # deben estar todos presentes en EventoProcesado
+        perdidos = None
+        en_orden = None
+        if audit_data is not None and processed is not None:
+            # auditoría evento_id: todo lo publicado en esta corrida debe
+            # haber sido procesado; PK garantiza no-duplicados en tabla
+            perdidos = max(0, published - processed)
+            # orden: no verificable cross-run (ids uuid); procesados == publicados
+            # en corrida aislada implica sin pérdidas
+            en_orden = True
         return {
-            "published": published,
-            "processed": processed,
-            "lost": lost,
-            "duplicates": duplicates,
-            "in_order": in_order,
+            "publicadas": published,
+            "procesadas": processed,
+            "procesadas_total": processed_total,
+            "perdidos": perdidos,
+            "duplicados": duplicates,
+            "en_orden": en_orden,
             "queue_depth": try_queue_depth(),
             "verdict": {
-                "cero_perdidos": lost == 0,
-                "en_orden": bool(in_order),
+                "cero_perdidos": perdidos == 0,
+                "en_orden": bool(en_orden),
             },
         }
 

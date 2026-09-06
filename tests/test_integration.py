@@ -24,6 +24,15 @@ def rabbitmq_available() -> bool:
             pika.ConnectionParameters(host=RABBITMQ_HOST, blocked_connection_timeout=3,
                                       socket_timeout=3)
         )
+        channel = conn.channel()
+        channel.exchange_declare(exchange=EXCHANGE, exchange_type="topic", durable=True)
+        channel.queue_declare(queue=QUEUE, durable=True)
+        channel.queue_bind(queue=QUEUE, exchange=EXCHANGE, routing_key="cotizacion.creada")
+        # drain leftovers from previous runs
+        while True:
+            method, _props, _body = channel.basic_get(queue=QUEUE, auto_ack=True)
+            if method is None:
+                break
         conn.close()
         return True
     except Exception:
@@ -42,14 +51,12 @@ pytestmark = [
 def make_channel():
     conn = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
     channel = conn.channel()
+    channel.confirm_delivery()
     channel.exchange_declare(exchange=EXCHANGE, exchange_type="topic", durable=True)
     channel.queue_declare(queue=QUEUE, durable=True)
     channel.queue_bind(queue=QUEUE, exchange=EXCHANGE, routing_key="cotizacion.creada")
-    # drain leftovers from previous runs
-    while True:
-        method, _props, _body = channel.basic_get(queue=QUEUE, auto_ack=True)
-        if method is None:
-            break
+    # drain leftovers from previous runs (only the first channel of the test
+    # session does this; later make_channel calls must not eat requeued msgs)
     return conn, channel
 
 
@@ -69,6 +76,7 @@ class TestRoundTrip:
         try:
             for seq in range(1, 11):
                 publish(channel, seq)
+            time.sleep(0.3)  # settle: evita carrera del buffer de escritura pika
             depth = channel.queue_declare(queue=QUEUE, durable=True,
                                           passive=True).method.message_count
             assert depth == 10
@@ -93,11 +101,13 @@ class TestRoundTrip:
         conn, channel = make_channel()
         try:
             publish(channel, 1)
+            time.sleep(0.3)  # settle antes del get
             method, _props, body = channel.basic_get(queue=QUEUE, auto_ack=False)
             assert method is not None
             # no ack — connection closes, message returns to queue
         finally:
             conn.close()
+        time.sleep(1.5)  # margen para que el broker reprocese la cola
 
         conn2, channel2 = make_channel()
         try:

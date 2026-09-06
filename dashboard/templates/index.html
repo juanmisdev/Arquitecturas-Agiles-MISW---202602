@@ -27,8 +27,8 @@
       <div class="node" id="node-cotizacion">
         <div class="node-icon">📝</div>
         <div class="node-name">Cotización</div>
-        <div class="node-counter" id="count-publicados">--</div>
-        <div class="node-label">publicados</div>
+        <div class="node-counter" id="count-publicadas">--</div>
+        <div class="node-label">publicadas</div>
       </div>
 
       <div class="arrow-zone">
@@ -59,8 +59,8 @@
       <div class="node" id="node-suscripcion">
         <div class="node-icon">📥</div>
         <div class="node-name">Suscripción</div>
-        <div class="node-counter" id="count-procesados">--</div>
-        <div class="node-label">procesados</div>
+        <div class="node-counter" id="count-procesadas">--</div>
+        <div class="node-label">procesadas</div>
         <div class="status-chip" id="status-suscripcion">estado: --</div>
       </div>
     </section>
@@ -68,7 +68,7 @@
     <section class="controls-panel">
       <div class="card experiment">
         <h2>Experimento automático</h2>
-        <p class="hint">Detiene Suscripción, publica N eventos, verifica la cola,
+        <p class="hint">Detiene Suscripción, publica N cotizaciones asíncronas, verifica la cola,
         reintegra y drena. Reporte final con garantías.</p>
         <div class="row">
           <label>N
@@ -96,12 +96,10 @@
     </section>
 
     <section class="counters-panel">
-      <div class="counter"><span class="c-label">Publicados</span><span class="c-value" id="counter-publicados">--</span></div>
+      <div class="counter"><span class="c-label">Cotizaciones publicadas</span><span class="c-value" id="counter-publicadas">--</span></div>
       <div class="counter"><span class="c-label">En cola</span><span class="c-value" id="counter-cola">--</span></div>
-      <div class="counter"><span class="c-label">Procesados</span><span class="c-value" id="counter-procesados">--</span></div>
-      <div class="counter warn"><span class="c-label">Perdidos</span><span class="c-value" id="counter-perdidos">--</span></div>
-      <div class="counter warn"><span class="c-label">Duplicados</span><span class="c-value" id="counter-duplicados">--</span></div>
-      <div class="counter"><span class="c-label">En orden</span><span class="c-value" id="counter-orden">--</span></div>
+      <div class="counter"><span class="c-label">Procesadas</span><span class="c-value" id="counter-procesadas">--</span></div>
+            <div class="counter warn"><span class="c-label">Duplicados</span><span class="c-value" id="counter-duplicados">--</span></div>
     </section>
   </main>
 
