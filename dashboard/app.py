@@ -278,9 +278,9 @@ class ExperimentRunner(threading.Thread):
             depth = try_queue_depth()
             if depth == 0:
                 break
-            time.sleep(1)
+            time.sleep(0.25)
         # margen para acks finales
-        time.sleep(2)
+        time.sleep(0.5)
 
         self.state["phase"] = "generando_reporte"
         report = self._report(published, baseline)

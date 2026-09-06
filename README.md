@@ -15,7 +15,7 @@ Experimento interactivo que demuestra que un broker de mensajería (RabbitMQ) **
 ```mermaid
 flowchart LR
     subgraph NAVEGADOR["Navegador"]
-        UI["index.html + app.js<br/>(poll /api/estado cada 1 s)"]
+        UI["index.html + app.js<br/>(poll /api/estado cada 0.4 s)"]
     end
 
     subgraph DASH["dashboard :5000 (host 8080)"]

@@ -1,8 +1,8 @@
 /* Experimento Broker — frontend logic.
-   All displayed values come from GET /api/estado (real state), polled 1s.
+   All displayed values come from GET /api/estado (real state), polled 400 ms.
    No simulated counters. */
 
-const POLL_MS = 1000;
+const POLL_MS = 400;
 const DOT_MAX = 12; // max dots rendered per track
 
 const $ = (id) => document.getElementById(id);
