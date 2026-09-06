@@ -10,22 +10,81 @@ Experimento interactivo que demuestra que un broker de mensajería (RabbitMQ) **
 
 ## Arquitectura
 
-```
-Navegador (index.html + app.js, poll 1s)
-     │ HTTP :5000 (host) / :8080 en docker compose
-     ▼
-  dashboard  ──── docker.sock ───► control real de ms-suscripcion (stop/start)
-     │  │
-     │  └── pika passive declare ───► rabbitmq (profundidad exacta de cola)
-     │
-     ├── HTTP :5001 /stats ────────► ms-cotizacion  (publicadas_async + por_estado)
-     └── HTTP :5002 /procesados ───► ms-suscripcion (procesados + duplicados + evento_ids)
+### Vista de componentes
 
-  modo sync:   Cotización ──REST POST /suscripciones──► Suscripción
-  modo async:  Cotización ──publica──► rabbitmq[cotizacion.creada, durable]
-                                        └─prefetch=1, manual ack──► Suscripción
-                                                                     │
-                                              SQLite /data/eventos_suscripcion.db (EventoProcesado)
+```mermaid
+flowchart LR
+    subgraph NAVEGADOR["Navegador"]
+        UI["index.html + app.js<br/>(poll /api/estado cada 1 s)"]
+    end
+
+    subgraph DASH["dashboard :5000 (host 8080)"]
+        API["Flask<br/>/api/estado · /api/experimento/iniciar<br/>/api/suscripcion/stop·start"]
+        CTRL["controller.py<br/>Docker SDK + fallback subprocess"]
+        AUDIT["auditoría evento_ids<br/>(SQLite read-only)"]
+    end
+
+    subgraph COT["ms-cotizacion :5001"]
+        VISTA["VistaCotizaciones<br/>modo sync | async"]
+        CALC["CalculadoraPrima"]
+        PUB["broker.py<br/>pika · cola durable"]
+        DB1[("SQLite<br/>Cotizacion")]
+    end
+
+    subgraph BROKER["rabbitmq :5672 · :15672"]
+        COLA[["cola durable<br/>cotizacion.creada"]]
+    end
+
+    subgraph SUS["ms-suscripcion :5002"]
+        CONSUMER["consumer.py<br/>ack manual · prefetch=1<br/>reconexión backoff"]
+        IDEMP["EventoProcesado<br/>(idempotencia por evento_id)"]
+        DB2[("SQLite<br/>/data/eventos_suscripcion.db")]
+    end
+
+    UI -->|"HTTP 1 s"| API
+    API --> CTRL
+    CTRL -.->|"docker.sock<br/>stop / start"| SUS
+    API -->|"pika passive declare<br/>(profundidad exacta)"| COLA
+    API -->|"GET /stats"| COT
+    API -->|"GET /procesados"| SUS
+    AUDIT -.->|"lee"| DB2
+
+    VISTA --> CALC
+    VISTA --> DB1
+    VISTA -->|"modo async: publica<br/>EventoCotizacionCreada"| PUB
+    PUB --> COLA
+    COLA -->|"prefetch=1<br/>ack manual"| CONSUMER
+    CONSUMER --> IDEMP
+    IDEMP --> DB2
+    VISTA -.->|"modo sync:<br/>REST POST /suscripciones<br/>(timeout 3 s)"| SUS
+```
+
+### Flujo del experimento (secuencia)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Usuario
+    participant D as Dashboard
+    participant C as ms-cotizacion
+    participant Q as cola cotizacion.creada
+    participant S as ms-suscripcion
+
+    U->>D: Click "Empezar experimento" (n mensajes)
+    D->>S: docker stop (Suscripción caída)
+    loop publicar n cotizaciones (modo async, pausa 0.8 s)
+        D->>C: POST /cotizaciones
+        C->>C: CalculadoraPrima + persistir
+        C->>Q: publica EventoCotizacionCreada (durable)
+    end
+    Note over Q: Mensajes acumulados — la falla queda<br/>enmascarada para el cliente (0 perdidos)
+    D->>S: docker start (reintegración)
+    S->>Q: consume (prefetch=1, ack manual)
+    loop hasta cola vacía
+        S->>S: INSERT EventoProcesado (idempotencia) → ack
+    end
+    D->>D: Auditoría evento_ids → reporte final
+    D-->>U: ✅ 0 perdidos · duplicados: n · en orden
 ```
 
 Servicios:
