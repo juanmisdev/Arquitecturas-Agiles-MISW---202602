@@ -12,6 +12,50 @@ let lastDepth = null;
 let lastPublished = null;
 let experimentRunning = false;
 
+// ------------------------------------------------- animaciones de actividad
+// Detecta SI hay flujo en cada tramo (delta de contadores reales entre polls)
+// y marca cada nodo con su estado: publishing / relaying / consuming / down.
+function animateActivity(estado) {
+  const now = {
+    published: estado.publicadas ?? null,
+    depth: estado.queue_depth ?? null,
+    processed: estado.procesadas ?? null,
+  };
+
+  // --- tramo 1: Cotización -> Broker (publicación: delta de publicadas)
+  const publishing = lastPublished !== null && now.published > lastPublished;
+  // --- tramo 2: Broker -> Suscripción (consumo: delta de procesadas)
+  const consuming = lastProcessed !== null && now.processed > lastProcessed;
+  // --- broker reenviando: la cola se está vaciando (delta negativa de depth)
+  const relaying = lastDepth !== null && now.depth !== null && now.depth < lastDepth;
+
+  setCotizacionState(publishing);
+  setBrokerState(relaying || (publishing && !consuming));
+  setSuscripcionState(consuming, estado.suscripcion_status);
+
+  lastPublished = now.published;
+  lastDepth = now.depth;
+  lastProcessed = now.processed;
+
+  // líneas de flujo activas
+  $("track-1").classList.toggle("flowing", publishing);
+  $("track-2").classList.toggle("flowing", consuming || relaying);
+}
+
+function setCotizacionState(publishing) {
+  $("node-cotizacion").classList.toggle("publishing", !!publishing);
+}
+
+function setBrokerState(active) {
+  $("node-broker").classList.toggle("relaying", !!active);
+}
+
+function setSuscripcionState(consuming, status) {
+  const node = $("node-suscripcion");
+  node.classList.toggle("consuming", !!consuming && status !== "stopped");
+  // el chip y la clase .down los maneja renderEstado (arriba/caído)
+}
+
 // ------------------------------------------------------------- estado poll
 async function pollEstado() {
   try {
@@ -43,6 +87,9 @@ function renderEstado(estado) {
   // track2 dots driven by drain delta (depth decrease).
   renderDots("dots-1", estado.publicadas, estado.queue_depth);
   renderDots("dots-2", estado.queue_depth, estado.procesadas);
+
+  // animaciones de actividad por nodo (publicando/relay/consumiendo/caído)
+  animateActivity(estado);
 
   // suscripcion node state
   const chip = $("status-suscripcion");
