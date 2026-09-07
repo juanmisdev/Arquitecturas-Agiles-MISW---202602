@@ -65,6 +65,20 @@ def try_queue_depth():
         return None
 
 
+def queue_purge():
+    """Vacía la cola durable. Devuelve el número de mensajes purgados."""
+    connection = pika.BlockingConnection(
+        pika.ConnectionParameters(host=RABBITMQ_HOST, heartbeat=60)
+    )
+    try:
+        channel = connection.channel()
+        channel.queue_declare(queue=QUEUE, durable=True)
+        result = channel.queue_purge(queue=QUEUE)
+        return result.method.message_count
+    finally:
+        connection.close()
+
+
 # ------------------------------------------------------------------ http aux
 def _get_json(url, timeout=3):
     try:
@@ -163,6 +177,41 @@ def sus_start():
     result = start_suscripcion()
     code = 200 if result["ok"] else 503
     return jsonify(result), code
+
+
+@app.post("/api/experimento/reset")
+def experimento_reset():
+    """Deja todo en 0: purga la cola y borra las tablas de ambos servicios.
+
+    Reintegra Suscripción primero (best-effort) para que su /reset sea
+    alcanzable y el sistema quede limpio y operativo.
+    """
+    with _runner_lock:
+        if _runner is not None and _runner.is_alive():
+            return jsonify({"ok": False, "error": "hay un experimento en curso"}), 409
+
+    resultado = {"purgados": None, "cotizacion": None, "suscripcion": None}
+    errores = []
+
+    start_suscripcion()  # best-effort: su /reset necesita el contenedor arriba
+    time.sleep(1.0)
+
+    try:
+        resultado["purgados"] = queue_purge()
+    except Exception as exc:
+        errores.append(f"purga de cola: {exc}")
+
+    for nombre, url in (("cotizacion", COTIZACION_URL), ("suscripcion", SUSCRIPCION_URL)):
+        try:
+            response = requests.post(f"{url}/reset", timeout=10)
+            response.raise_for_status()
+            resultado[nombre] = (response.json() or {}).get("borradas")
+        except Exception as exc:
+            errores.append(f"{nombre}: {exc}")
+
+    if errores:
+        return jsonify({"ok": False, "error": "; ".join(errores), **resultado}), 502
+    return jsonify({"ok": True, **resultado})
 
 
 @app.post("/api/experimento/publicar")

@@ -259,6 +259,37 @@ async function manualStart() {
   await manualAction("/api/suscripcion/start", "Reiniciando Suscripción…");
 }
 
+async function resetDatos() {
+  if (!confirm("¿Borrar todo? Se purga la cola y se eliminan las cotizaciones " +
+               "y los eventos procesados. Todos los contadores vuelven a 0.")) {
+    return;
+  }
+  const fb = $("manual-feedback");
+  fb.className = "feedback";
+  fb.textContent = "Reiniciando datos…";
+  disableControls(true);
+  try {
+    const res = await fetch("/api/experimento/reset", { method: "POST" });
+    const data = await res.json();
+    if (data.ok) {
+      fb.className = "feedback ok";
+      fb.textContent =
+        `Datos reiniciados (cola purgada: ${fmt(data.purgados)}, ` +
+        `cotizaciones: ${fmt(data.cotizacion)}, eventos: ${fmt(data.suscripcion)}).`;
+      lastProcessed = lastDepth = lastPublished = null;
+      pollEstado();
+    } else {
+      fb.className = "feedback error";
+      fb.textContent = "Falló: " + (data.error || "desconocido");
+    }
+  } catch (e) {
+    fb.className = "feedback error";
+    fb.textContent = "Error de red: " + e;
+  } finally {
+    disableControls(false);
+  }
+}
+
 async function manualPublicar() {
   const n = parseInt($("input-publicar").value, 10) || 10;
   const modo = $("select-publicar-modo").value;
@@ -313,8 +344,8 @@ function setText(id, v) {
   if (el) el.textContent = v;
 }
 function disableControls(disabled) {
-  ["btn-experimento", "btn-stop", "btn-start", "btn-publicar"].forEach((id) =>
-    $(id).disabled = disabled
+  ["btn-experimento", "btn-stop", "btn-start", "btn-publicar", "btn-reset"].forEach(
+    (id) => ($(id).disabled = disabled)
   );
 }
 
@@ -325,6 +356,7 @@ $("btn-experimento").addEventListener("click", iniciarExperimento);
 $("btn-stop").addEventListener("click", manualStop);
 $("btn-start").addEventListener("click", manualStart);
 $("btn-publicar").addEventListener("click", manualPublicar);
+$("btn-reset").addEventListener("click", resetDatos);
 $("btn-close-modal").addEventListener("click", () => $("modal").classList.add("hidden"));
 $("banner-dismiss").addEventListener("click", () => $("manual-banner").classList.add("hidden"));
 

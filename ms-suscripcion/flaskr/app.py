@@ -2,7 +2,7 @@
 from flask_restful import Api
 
 from . import create_app
-from .vistas import VistaProcesados, VistaSuscripciones, VistaHealth
+from .vistas import VistaProcesados, VistaSuscripciones, VistaReset, VistaHealth
 from .consumer import ensure_app_context, start_consumer
 
 app = ensure_app_context()
@@ -10,6 +10,7 @@ app = ensure_app_context()
 api = Api(app)
 api.add_resource(VistaProcesados, '/procesados')
 api.add_resource(VistaSuscripciones, '/suscripciones')
+api.add_resource(VistaReset, '/reset')
 api.add_resource(VistaHealth, '/health')
 
 start_consumer()

@@ -46,6 +46,15 @@ class VistaSuscripciones(Resource):
         return {"status": "procesado"}, 201
 
 
+class VistaReset(Resource):
+    """Borra los eventos procesados y reinicia el contador de duplicados."""
+    def post(self):
+        borradas = db.session.query(EventoProcesado).delete()
+        db.session.commit()
+        consumer_thread.eventos_duplicados = 0
+        return {"borradas": borradas}, 200
+
+
 class VistaHealth(Resource):
     def get(self):
         return {"status": "ok"}, 200
