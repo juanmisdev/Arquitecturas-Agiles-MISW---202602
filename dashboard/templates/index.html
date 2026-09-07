@@ -12,7 +12,10 @@
       <span class="brand-dot"></span>
       <h1>Experimento Broker Interactivo</h1>
     </div>
-    <div id="docker-badge" class="badge">modo: —</div>
+    <div class="badges">
+      <div id="mode-badge" class="badge">conector: comparar</div>
+      <div id="docker-badge" class="badge">docker: —</div>
+    </div>
   </header>
 
   <div id="manual-banner" class="banner hidden">
@@ -34,7 +37,6 @@
       <div class="arrow-zone">
         <div class="flow-track" id="track-1">
           <div class="flow-line"></div>
-          <div class="dots" id="dots-1"></div>
         </div>
         <div class="arrow-caption">→</div>
       </div>
@@ -51,7 +53,6 @@
       <div class="arrow-zone">
         <div class="flow-track" id="track-2">
           <div class="flow-line"></div>
-          <div class="dots" id="dots-2"></div>
         </div>
         <div class="arrow-caption">→</div>
       </div>
@@ -68,9 +69,18 @@
     <section class="controls-panel">
       <div class="card experiment">
         <h2>Experimento automático</h2>
-        <p class="hint">Detiene Suscripción, publica N cotizaciones asíncronas, verifica la cola,
-        reintegra y drena. Reporte final con garantías.</p>
+        <p class="hint">Punto de sensibilidad: conector <strong>síncrono (REST)</strong> vs
+        <strong>asíncrono (broker)</strong> ante la caída de Suscripción. Cada brazo detiene
+        Suscripción, publica N cotizaciones, la reintegra y mide errores del cliente, latencia,
+        encolados y perdidos. Reporte final con tabla comparativa.</p>
         <div class="row">
+          <label>Conector
+            <select id="select-modo">
+              <option value="compare">Comparar sync vs async</option>
+              <option value="async">Solo async (broker)</option>
+              <option value="sync">Solo sync (REST)</option>
+            </select>
+          </label>
           <label>N
             <input type="number" id="input-n" value="100" min="1" max="10000">
           </label>
@@ -85,11 +95,21 @@
           <button id="btn-stop" class="btn danger">Detener Suscripción</button>
           <button id="btn-start" class="btn success">Reiniciar Suscripción</button>
         </div>
-        <div class="row">
+        <div class="row wrap">
           <label>Publicar
             <input type="number" id="input-publicar" value="10" min="1" max="10000">
           </label>
+          <label>como
+            <select id="select-publicar-modo">
+              <option value="async">async (broker)</option>
+              <option value="sync">sync (REST)</option>
+            </select>
+          </label>
           <button id="btn-publicar" class="btn">Publicar N</button>
+        </div>
+        <div class="row">
+          <button id="btn-reset" class="btn danger">Reiniciar datos a 0</button>
+          <span class="hint">Purga la cola y borra cotizaciones y eventos procesados.</span>
         </div>
         <div id="manual-feedback" class="feedback"></div>
       </div>
@@ -99,7 +119,8 @@
       <div class="counter"><span class="c-label">Cotizaciones publicadas</span><span class="c-value" id="counter-publicadas">--</span></div>
       <div class="counter"><span class="c-label">En cola</span><span class="c-value" id="counter-cola">--</span></div>
       <div class="counter"><span class="c-label">Procesadas</span><span class="c-value" id="counter-procesadas">--</span></div>
-            <div class="counter warn"><span class="c-label">Duplicados</span><span class="c-value" id="counter-duplicados">--</span></div>
+      <div class="counter warn"><span class="c-label">Errores del cliente</span><span class="c-value" id="counter-errores">--</span></div>
+      <div class="counter warn"><span class="c-label">Duplicados</span><span class="c-value" id="counter-duplicados">--</span></div>
     </section>
   </main>
 

@@ -121,6 +121,15 @@ class VistaStats(Resource):
         return {"publicadas_async": publicadas_async, "por_estado": por_estado}, 200
 
 
+class VistaReset(Resource):
+    """Borra todas las cotizaciones: deja los contadores del dashboard en 0."""
+    def post(self):
+        borradas = db.session.query(Cotizacion).delete()
+        db.session.commit()
+        logger.info("reset: %s cotizaciones borradas", borradas)
+        return {"borradas": borradas}, 200
+
+
 class VistaHealth(Resource):
     def get(self):
         return {"status": "ok"}, 200

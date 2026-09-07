@@ -136,9 +136,24 @@ docker compose ps
 ## Ejecución automática (recomendada para demo)
 
 1. Abre http://localhost:8080.
-2. Deja N = 100 (configurable) y pulsa **“Empezar experimento”**.
-3. Observa las fases: detiene Suscripción → publica 100 cotizaciones async → los dots se **acumulan** en el Broker (profundidad de cola llega a 100, procesadas 0) → reintegra Suscripción → la cola se **drena** → aparece el **reporte final**.
-4. El reporte muestra (auditoría por `evento_id`): procesadas = 100, **perdidos = 0**, **duplicados = 0**.
+2. Elige **Conector = “Comparar sync vs async”**, deja N = 100 (configurable) y pulsa **“Empezar experimento”**.
+3. El orquestador corre **dos brazos** con la misma falla (Suscripción caída):
+   - **Brazo sync (REST):** detiene Suscripción → publica N con `modo=sync` (cada `POST /cotizaciones` mide su latencia; Cotización intenta el REST a Suscripción y falla) → reintegra → mide.
+   - **Brazo async (broker):** detiene Suscripción → publica N con `modo=async` → los eventos se **acumulan** en la cola durable → reintegra → la cola se **drena** → mide.
+4. Aparece el **reporte final** con la tabla comparativa:
+
+   | Métrica | Sync (REST) | Async (broker) |
+   |---|---|---|
+   | Errores vistos por el cliente | ≈ N | **0** |
+   | Latencia p50 / p95 (ms) mientras el consumidor está caído | ≈ 3–4 s | ≈ pocos ms |
+   | Encolados durante la caída | 0 | N |
+   | Procesados al reintegrar | ≈ 0 | N |
+   | **Perdidos** | ≈ N | **0** |
+   | Duplicados | 0 | 0 |
+
+   Veredicto: el conector síncrono **propaga** la caída al cliente; el broker la **enmascara** (0 errores, 0 perdidos). Esto mide el punto de sensibilidad y decide la adopción del broker.
+
+> Para correr un solo brazo, elige Conector = “Solo async” o “Solo sync”. El contador **“Errores del cliente”** del panel en vivo es acumulado (bucket `estado=error` de Cotización); el reporte usa deltas por corrida.
 
 ## Ejecución manual (paso a paso)
 

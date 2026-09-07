@@ -3,7 +3,6 @@
    No simulated counters. */
 
 const POLL_MS = 400;
-const DOT_MAX = 12; // max dots rendered per track
 
 const $ = (id) => document.getElementById(id);
 
@@ -75,18 +74,13 @@ function renderEstado(estado) {
   setText("counter-publicadas", fmt(estado.publicadas));
   setText("counter-cola", fmt(estado.queue_depth));
   setText("counter-procesadas", fmt(estado.procesadas));
-  setText("counter-perdidos", "--");
+  setText("counter-errores", fmt(estado.errores_cliente));
   setText("counter-duplicados", fmt(estado.duplicados));
 
   // queue fill (relative to published total, min 100 to normalize)
   const denom = Math.max(estado.publicadas || 0, lastPublished || 0, 100);
   const pct = estado.queue_depth === null ? 0 : Math.min(100, (estado.queue_depth / denom) * 100);
   $("queue-fill").style.width = pct + "%";
-
-  // animation dots: accumulate track1 while published > processed deltas;
-  // track2 dots driven by drain delta (depth decrease).
-  renderDots("dots-1", estado.publicadas, estado.queue_depth);
-  renderDots("dots-2", estado.queue_depth, estado.procesadas);
 
   // animaciones de actividad por nodo (publicando/relay/consumiendo/caído)
   animateActivity(estado);
@@ -128,33 +122,11 @@ function renderEstado(estado) {
   }
 }
 
-function renderDots(trackId, produced, consumed) {
-  const container = $(trackId);
-  container.innerHTML = "";
-  if (produced === null || consumed === null) return;
-  const inflight = Math.max(0, produced - consumed);
-  const count = Math.min(DOT_MAX, inflight);
-  for (let i = 0; i < count; i++) {
-    const dot = document.createElement("div");
-    dot.className = "dot";
-    // stagger dots across the track; they accumulate as inflight grows
-    dot.style.left = 8 + (i / Math.max(1, DOT_MAX - 1)) * 80 + "%";
-    dot.style.animationDelay = (i * 0.12) + "s";
-    container.appendChild(dot);
-  }
-}
-
-// dots glide subtly via CSS animation
-const style = document.createElement("style");
-style.textContent = `
-  .dot { animation: dotpulse 1.2s ease-in-out infinite; }
-  @keyframes dotpulse { 0%,100% { transform: translateY(-2px); opacity: .7; }
-                        50% { transform: translateY(2px); opacity: 1; } }`;
-document.head.appendChild(style);
 
 // ------------------------------------------------------------ experimento
 async function iniciarExperimento() {
   const n = parseInt($("input-n").value, 10) || 100;
+  const modo = $("select-modo").value;
   disableControls(true);
   $("experiment-phase").classList.remove("hidden");
   $("experiment-phase").textContent = "Iniciando…";
@@ -162,7 +134,7 @@ async function iniciarExperimento() {
     const res = await fetch("/api/experimento/iniciar", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ n }),
+      body: JSON.stringify({ n, modo }),
     });
     const data = await res.json();
     if (!data.ok) {
@@ -181,28 +153,33 @@ async function trackExperiment() {
   const phaseNames = {
     iniciando: "Iniciando…",
     deteniendo_suscripcion: "Deteniendo Suscripción…",
-    publicando: "Publicando eventos…",
-    acumulando: "Eventos acumulándose en el broker…",
+    publicando: "Publicando cotizaciones…",
+    acumulando: "Acumulando en el broker…",
     reintegrando_suscripcion: "Reintegrando Suscripción…",
     drenando: "Drenando la cola…",
     generando_reporte: "Generando reporte…",
   };
+  const armLabel = { sync: "Sync (REST)", async: "Async (broker)" };
   const timer = setInterval(async () => {
     try {
       const res = await fetch("/api/experimento/estado");
       const estado = await res.json();
       if (estado.status === "idle") return;
+      const arm = estado.arm ? `[${armLabel[estado.arm] || estado.arm}] ` : "";
       $("experiment-phase").textContent =
-        phaseNames[estado.phase] || estado.phase || "";
+        arm + (phaseNames[estado.phase] || estado.phase || "");
+      if (estado.arm) setModeBadge(estado.arm);
 
       if (estado.status === "done") {
         clearInterval(timer);
         disableControls(false);
+        setModeBadge($("select-modo").value);
         $("experiment-phase").classList.add("hidden");
         showReport(estado.report);
       } else if (estado.status === "error" || estado.status === "requires_manual") {
         clearInterval(timer);
         disableControls(false);
+        setModeBadge($("select-modo").value);
         $("experiment-phase").textContent =
           "Error: " + (estado.error || "") +
           (estado.manual ? " — ejecuta: " + estado.manual : "");
@@ -216,34 +193,59 @@ async function trackExperiment() {
 
 function showReport(report) {
   if (!report) return;
-  const rows = [
-    ["Cotizaciones publicadas", report.publicadas],
-    ["Procesadas", report.procesadas],
-    ["En cola (restante)", report.queue_depth],
-    ["Perdidos", report.perdidos],
-    ["Duplicados", report.duplicados],
+  const arms = ["sync", "async"].filter((a) => report[a]);
+  const armHead = { sync: "Sync (REST)", async: "Async (broker)" };
+  const metrics = [
+    ["operaciones_cliente", "Operaciones del cliente"],
+    ["errores_cliente", "Errores vistos por el cliente"],
+    ["encolados_durante_caida", "Encolados durante la caída"],
+    ["procesados_reintegrar", "Procesados al reintegrar"],
+    ["perdidos", "Perdidos"],
+    ["duplicados", "Duplicados"],
   ];
-  $("report-body").innerHTML = rows
-    .map(
-      ([k, v]) =>
-        `<div class="report-row"><span>${k}</span><span>${fmt(v)}</span></div>`
-    )
-    .join("");
+
+  let html = "<table class='cmp'><thead><tr><th>Métrica</th>";
+  html += arms.map((a) => `<th>${armHead[a]}</th>`).join("");
+  html += "</tr></thead><tbody>";
+  for (const [key, label] of metrics) {
+    html += `<tr><td>${label}</td>`;
+    html += arms.map((a) => `<td>${fmt(report[a][key])}</td>`).join("");
+    html += "</tr>";
+  }
+  for (const stat of ["p50", "p95", "max"]) {
+    html += `<tr><td>Latencia ${stat} (ms)</td>`;
+    html += arms
+      .map((a) => `<td>${fmt(report[a].latencia_ms && report[a].latencia_ms[stat])}</td>`)
+      .join("");
+    html += "</tr>";
+  }
+  html += "</tbody></table>";
+  $("report-body").innerHTML = html;
 
   const v = report.verdict || {};
-  const ok = v.cero_perdidos && v.en_orden;
-  $("report-verdict").innerHTML = `
-    <div class="${v.cero_perdidos ? "verdict-ok" : "verdict-bad"}">
-      ${v.cero_perdidos ? "✓ Cero eventos perdidos (auditoría evento_id)" : "✗ Se perdieron eventos"}
-    </div>
-    <div class="${v.en_orden ? "verdict-ok" : "verdict-bad"}">
-      ${v.en_orden ? "✓ Procesados en orden" : "✗ Fuera de orden"}
-    </div>
-    <div class="${(report.duplicates || 0) === 0 ? "verdict-ok" : "verdict-bad"}">
-      ${(report.duplicados || 0) === 0
-        ? "✓ Sin duplicados"
-        : `⚠ ${report.duplicados} duplicado(s) detectado(s)`}
-    </div>`;
+  const lines = [];
+  if ("sync_propaga_falla" in v) {
+    lines.push(
+      `<div class="${v.sync_propaga_falla ? "verdict-bad" : "verdict-ok"}">${
+        v.sync_propaga_falla
+          ? "✗ Sync: la caída del consumidor llega al cliente (errores)"
+          : "○ Sync: no se observaron errores en el cliente"
+      }</div>`
+    );
+  }
+  if ("broker_enmascara_falla" in v) {
+    lines.push(
+      `<div class="${v.broker_enmascara_falla ? "verdict-ok" : "verdict-bad"}">${
+        v.broker_enmascara_falla
+          ? "✓ Async: el broker enmascara la falla (0 errores, 0 perdidos)"
+          : "✗ Async: no se cumplió — revisar cola durable / ack manual"
+      }</div>`
+    );
+  }
+  if (v.recomendacion) {
+    lines.push(`<div class="verdict-reco">→ ${v.recomendacion}</div>`);
+  }
+  $("report-verdict").innerHTML = lines.join("");
 
   $("modal").classList.remove("hidden");
 }
@@ -257,12 +259,44 @@ async function manualStart() {
   await manualAction("/api/suscripcion/start", "Reiniciando Suscripción…");
 }
 
+async function resetDatos() {
+  if (!confirm("¿Borrar todo? Se purga la cola y se eliminan las cotizaciones " +
+               "y los eventos procesados. Todos los contadores vuelven a 0.")) {
+    return;
+  }
+  const fb = $("manual-feedback");
+  fb.className = "feedback";
+  fb.textContent = "Reiniciando datos…";
+  disableControls(true);
+  try {
+    const res = await fetch("/api/experimento/reset", { method: "POST" });
+    const data = await res.json();
+    if (data.ok) {
+      fb.className = "feedback ok";
+      fb.textContent =
+        `Datos reiniciados (cola purgada: ${fmt(data.purgados)}, ` +
+        `cotizaciones: ${fmt(data.cotizacion)}, eventos: ${fmt(data.suscripcion)}).`;
+      lastProcessed = lastDepth = lastPublished = null;
+      pollEstado();
+    } else {
+      fb.className = "feedback error";
+      fb.textContent = "Falló: " + (data.error || "desconocido");
+    }
+  } catch (e) {
+    fb.className = "feedback error";
+    fb.textContent = "Error de red: " + e;
+  } finally {
+    disableControls(false);
+  }
+}
+
 async function manualPublicar() {
   const n = parseInt($("input-publicar").value, 10) || 10;
+  const modo = $("select-publicar-modo").value;
   await manualAction(
     "/api/experimento/publicar",
-    `Publicando ${n} eventos…`,
-    JSON.stringify({ n })
+    `Publicando ${n} cotizaciones (${modo})…`,
+    JSON.stringify({ n, modo })
   );
 }
 
@@ -293,23 +327,36 @@ async function manualAction(url, msg, body) {
 }
 
 // ---------------------------------------------------------------- helpers
+const MODE_LABELS = {
+  compare: "conector: comparar",
+  sync: "conector: sync (REST)",
+  async: "conector: async (broker)",
+};
+function setModeBadge(mode) {
+  $("mode-badge").textContent = MODE_LABELS[mode] || `conector: ${mode}`;
+}
+
 function fmt(v) {
   return v === null || v === undefined ? "--" : v;
 }
 function setText(id, v) {
-  $(id).textContent = v;
+  const el = $(id);
+  if (el) el.textContent = v;
 }
 function disableControls(disabled) {
-  ["btn-experimento", "btn-stop", "btn-start", "btn-publicar"].forEach((id) =>
-    $(id).disabled = disabled
+  ["btn-experimento", "btn-stop", "btn-start", "btn-publicar", "btn-reset"].forEach(
+    (id) => ($(id).disabled = disabled)
   );
 }
 
 // ------------------------------------------------------------------ wiring
+$("select-modo").addEventListener("change", (e) => setModeBadge(e.target.value));
+setModeBadge($("select-modo").value);
 $("btn-experimento").addEventListener("click", iniciarExperimento);
 $("btn-stop").addEventListener("click", manualStop);
 $("btn-start").addEventListener("click", manualStart);
 $("btn-publicar").addEventListener("click", manualPublicar);
+$("btn-reset").addEventListener("click", resetDatos);
 $("btn-close-modal").addEventListener("click", () => $("modal").classList.add("hidden"));
 $("banner-dismiss").addEventListener("click", () => $("manual-banner").classList.add("hidden"));
 

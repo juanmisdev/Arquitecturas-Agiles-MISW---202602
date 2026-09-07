@@ -17,7 +17,13 @@ from flask import Flask
 from flask_restful import Api
 
 from .models import db
-from .vistas import VistaCotizaciones, VistaCotizacion, VistaHealth, VistaStats
+from .vistas import (
+    VistaCotizaciones,
+    VistaCotizacion,
+    VistaHealth,
+    VistaReset,
+    VistaStats,
+)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -35,6 +41,7 @@ def create_app(config_name='default'):
     api.add_resource(VistaCotizaciones, '/cotizaciones')
     api.add_resource(VistaCotizacion, '/cotizaciones/<id>')
     api.add_resource(VistaStats, '/stats')
+    api.add_resource(VistaReset, '/reset')
     api.add_resource(VistaHealth, '/health')
     return app
 

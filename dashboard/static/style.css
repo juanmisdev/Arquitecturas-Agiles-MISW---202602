@@ -48,6 +48,8 @@ body {
 }
 .badge.ok { color: var(--success); border-color: var(--success); }
 .badge.manual { color: var(--warning); border-color: var(--warning); }
+.badges { display: flex; gap: 8px; align-items: center; }
+#mode-badge { color: var(--accent); border-color: var(--accent); }
 
 .banner {
   margin: 14px 28px 0;
@@ -182,16 +184,6 @@ main { padding: 20px 28px 40px; max-width: 1200px; margin: 0 auto; }
 }
 /* Línea activa mientras hay flujo en esa dirección */
 .flow-track.flowing .flow-line { background: linear-gradient(90deg, var(--accent), #818cf8); }
-.dots { position: absolute; inset: 0; }
-.dot {
-  position: absolute;
-  top: 50%;
-  width: 10px; height: 10px;
-  margin-top: -5px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 6px var(--accent);
-}
 .arrow-caption {
   text-align: center;
   color: var(--muted);
@@ -240,6 +232,15 @@ input[type="number"] {
   font-size: 0.95rem;
 }
 
+select {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #475569;
+  background: #0f172a;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
 .btn {
   padding: 9px 18px;
   border-radius: 8px;
@@ -275,7 +276,7 @@ input[type="number"] {
 /* ---- Counters ---- */
 .counters-panel {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 12px;
 }
 .counter {
@@ -303,8 +304,37 @@ input[type="number"] {
   border: 1px solid #475569;
   border-radius: 16px;
   padding: 28px;
-  width: min(480px, 92vw);
+  width: min(560px, 92vw);
   text-align: center;
+}
+
+table.cmp {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  margin-bottom: 8px;
+}
+table.cmp th,
+table.cmp td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #334155;
+  text-align: right;
+}
+table.cmp th:first-child,
+table.cmp td:first-child {
+  text-align: left;
+  color: var(--muted);
+}
+table.cmp thead th {
+  color: var(--text);
+  border-bottom: 2px solid #475569;
+}
+table.cmp tbody td:last-child { color: var(--accent); font-weight: 700; }
+.verdict-reco {
+  color: var(--accent);
+  font-weight: 700;
+  margin-top: 10px;
+  line-height: 1.5;
 }
 .modal h2 { margin-bottom: 16px; }
 .report-body { font-size: 0.95rem; margin-bottom: 16px; }

@@ -10,6 +10,7 @@
                      drain -> report; GET /api/experimento/estado
 """
 import logging
+import math
 import os
 import sqlite3
 import threading
@@ -62,6 +63,20 @@ def try_queue_depth():
     except Exception as exc:
         logger.warning("queue_depth failed: %s", exc)
         return None
+
+
+def queue_purge():
+    """Vacía la cola durable. Devuelve el número de mensajes purgados."""
+    connection = pika.BlockingConnection(
+        pika.ConnectionParameters(host=RABBITMQ_HOST, heartbeat=60)
+    )
+    try:
+        channel = connection.channel()
+        channel.queue_declare(queue=QUEUE, durable=True)
+        result = channel.queue_purge(queue=QUEUE)
+        return result.method.message_count
+    finally:
+        connection.close()
 
 
 # ------------------------------------------------------------------ http aux
@@ -127,11 +142,18 @@ def estado():
     elif depth is not None or cot_stats is not None:
         suscripcion_status = "stopped"
 
+    # errores vistos por el cliente: cotizaciones con estado=error
+    # (sync que no pudo entregar, o async que no pudo publicar en el broker)
+    errores_cliente = None
+    if cot_stats is not None:
+        errores_cliente = cot_stats.get("por_estado", {}).get("error", 0)
+
     return jsonify({
         "publicadas": published,
         "queue_depth": depth,
         "procesadas": processed,
         "duplicados": duplicates,
+        "errores_cliente": errores_cliente,
         "evento_ids": audit_data["evento_ids"] if audit_data else (
             sus_stats.get("evento_ids", []) if sus_stats else []
         ),
@@ -157,9 +179,44 @@ def sus_start():
     return jsonify(result), code
 
 
+@app.post("/api/experimento/reset")
+def experimento_reset():
+    """Deja todo en 0: purga la cola y borra las tablas de ambos servicios.
+
+    Reintegra Suscripción primero (best-effort) para que su /reset sea
+    alcanzable y el sistema quede limpio y operativo.
+    """
+    with _runner_lock:
+        if _runner is not None and _runner.is_alive():
+            return jsonify({"ok": False, "error": "hay un experimento en curso"}), 409
+
+    resultado = {"purgados": None, "cotizacion": None, "suscripcion": None}
+    errores = []
+
+    start_suscripcion()  # best-effort: su /reset necesita el contenedor arriba
+    time.sleep(1.0)
+
+    try:
+        resultado["purgados"] = queue_purge()
+    except Exception as exc:
+        errores.append(f"purga de cola: {exc}")
+
+    for nombre, url in (("cotizacion", COTIZACION_URL), ("suscripcion", SUSCRIPCION_URL)):
+        try:
+            response = requests.post(f"{url}/reset", timeout=10)
+            response.raise_for_status()
+            resultado[nombre] = (response.json() or {}).get("borradas")
+        except Exception as exc:
+            errores.append(f"{nombre}: {exc}")
+
+    if errores:
+        return jsonify({"ok": False, "error": "; ".join(errores), **resultado}), 502
+    return jsonify({"ok": True, **resultado})
+
+
 @app.post("/api/experimento/publicar")
 def experimento_publicar():
-    """Manual publish: crea n cotizaciones modo=async en ms-cotizacion."""
+    """Manual publish: crea n cotizaciones en ms-cotizacion (modo async|sync)."""
     body = request.get_json(silent=True) or {}
     try:
         n = int(body.get("n", 10))
@@ -167,53 +224,136 @@ def experimento_publicar():
         return jsonify({"ok": False, "error": "n invalido"}), 400
     if n < 1 or n > 10000:
         return jsonify({"ok": False, "error": "n debe ser 1..10000"}), 400
-    tipos = ["auto", "hogar", "vida", "salud"]
-    errores = []
+    modo = body.get("modo", "async")
+    if modo not in ("async", "sync"):
+        return jsonify({"ok": False, "error": "modo debe ser async|sync"}), 400
     # Pausa entre publicaciones (segundos): hace visible el flujo en el dashboard.
     # Env PAUSE_ENTRE_PUBLICACIONES, defecto 0.0.
     try:
         pausa = float(os.environ.get("PAUSE_ENTRE_PUBLICACIONES", "0"))
     except ValueError:
         pausa = 0.0
-    for i in range(n):
-        payload = {
-            "cliente_id": f"cliente-{i % 50}",
-            "tipo_seguro": tipos[i % len(tipos)],
-            "valor_asegurado": 1000.0 + (i % 100) * 250.0,
-            "modo": "async",
-        }
-        try:
-            response = requests.post(f"{COTIZACION_URL}/cotizaciones",
-                                     json=payload, timeout=10)
-            if response.status_code != 201:
-                errores.append(response.text[:120])
-        except Exception as exc:
-            logger.error("manual publish failed: %s", exc)
-            errores.append(str(exc))
-        if pausa > 0 and i < n - 1:
-            time.sleep(pausa)
-    if errores:
-        return jsonify({"ok": False, "error": errores[0],
-                        "fallos": len(errores), "publicadas": n - len(errores)}), 502
-    return jsonify({"ok": True, "publicadas": n})
+    lote = _publicar_lote(n, modo, pausa)
+    if lote["errores_cliente"]:
+        return jsonify({"ok": False, "error": "hubo errores en la publicación",
+                        "modo": modo, "errores_cliente": lote["errores_cliente"],
+                        "publicadas": lote["enviadas_ok"]}), 502
+    return jsonify({"ok": True, "modo": modo, "publicadas": lote["enviadas_ok"]})
 
 
 # ------------------------------------------------------------ orchestrator
-class ExperimentRunner(threading.Thread):
-    """Runs: stop -> publish n -> poll depth -> start -> drain -> report."""
+TIPOS = ["auto", "hogar", "vida", "salud"]
 
-    def __init__(self, n):
+
+def _percentile(values, p):
+    """Percentil p (0..100) por interpolación lineal. None si no hay datos."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return round(ordered[0], 1)
+    k = (len(ordered) - 1) * (p / 100.0)
+    lo = math.floor(k)
+    hi = math.ceil(k)
+    if lo == hi:
+        return round(ordered[int(k)], 1)
+    val = ordered[lo] + (ordered[hi] - ordered[lo]) * (k - lo)
+    return round(val, 1)
+
+
+def _sus_duplicados():
+    stats = _get_json(f"{SUSCRIPCION_URL}/procesados")
+    return stats.get("duplicados", 0) if stats else 0
+
+
+def _publicar_lote(n, modo, pausa):
+    """Publica n cotizaciones en `modo`, midiendo cada POST /cotizaciones.
+
+    "Errores vistos por el cliente" = la operación no confirmó la entrega:
+    HTTP != 201, o body con estado='error' (sync que no pudo entregar por
+    REST, o async que no pudo publicar en el broker).
+    """
+    latencias = []
+    errores_cliente = 0
+    enviadas_ok = 0
+    for i in range(n):
+        payload = {
+            "cliente_id": f"cliente-{i % 50}",
+            "tipo_seguro": TIPOS[i % len(TIPOS)],
+            "valor_asegurado": 1000.0 + (i % 100) * 250.0,
+            "modo": modo,
+        }
+        t0 = time.perf_counter()
+        try:
+            response = requests.post(f"{COTIZACION_URL}/cotizaciones",
+                                     json=payload, timeout=15)
+            latencias.append((time.perf_counter() - t0) * 1000.0)
+            estado = None
+            if response.status_code == 201:
+                try:
+                    estado = (response.json() or {}).get("estado")
+                except ValueError:
+                    estado = None
+            if response.status_code == 201 and estado != "error":
+                enviadas_ok += 1
+            else:
+                errores_cliente += 1
+        except Exception as exc:
+            latencias.append((time.perf_counter() - t0) * 1000.0)
+            errores_cliente += 1
+            logger.warning("publicar %s falló: %s", modo, exc)
+        if pausa > 0 and i < n - 1:
+            time.sleep(pausa)
+    return {
+        "latencias": latencias,
+        "errores_cliente": errores_cliente,
+        "enviadas_ok": enviadas_ok,
+    }
+
+
+class ExperimentRunner(threading.Thread):
+    """Corre uno o ambos brazos del punto de sensibilidad (sync REST vs
+    async broker) bajo caída del consumidor y produce una tabla comparativa.
+
+    Cada brazo: detiene Suscripción -> publica n -> (async: acumula y drena)
+    -> reintegra Suscripción -> mide errores del cliente, latencia, encolados,
+    procesados al reintegrar y perdidos.
+    """
+
+    def __init__(self, n, arms):
         super().__init__(daemon=True, name="experiment-runner")
         self.n = n
+        self.arms = list(arms)
         self.state = {
             "status": "running",
             "phase": "iniciando",
+            "arm": None,
+            "arms": list(arms),
             "started_at": datetime.now(timezone.utc).isoformat(),
             "finished_at": None,
             "error": None,
             "report": None,
         }
 
+    # ------------------------------------------------------------- helpers
+    def _phase(self, arm, phase):
+        self.state["arm"] = arm
+        self.state["phase"] = phase
+
+    def _fail_manual(self, msg, manual):
+        self.state["status"] = "requires_manual"
+        self.state["error"] = msg
+        self.state["manual"] = manual
+        self.state["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+    def _processed_now(self):
+        audit_data = evento_audit()
+        if audit_data is not None:
+            return audit_data["processed"]
+        stats = _get_json(f"{SUSCRIPCION_URL}/procesados")
+        return stats.get("procesados") if stats else 0
+
+    # ---------------------------------------------------------------- run
     def run(self):
         try:
             self._run()
@@ -224,112 +364,134 @@ class ExperimentRunner(threading.Thread):
             self.state["finished_at"] = datetime.now(timezone.utc).isoformat()
 
     def _run(self):
-        n = self.n
-        self.state["phase"] = "deteniendo_suscripcion"
-        stop_result = stop_suscripcion()
-        if not stop_result["ok"]:
-            self.state["status"] = "requires_manual"
-            self.state["error"] = "No se pudo detener Suscripción automáticamente"
-            self.state["manual"] = stop_result.get("manual", MANUAL_STOP)
-            self.state["finished_at"] = datetime.now(timezone.utc).isoformat()
-            return
-
-        self.state["phase"] = "publicando"
-        baseline = self._processed_now()
-        tipos = ["auto", "hogar", "vida", "salud"]
         try:
             pausa = float(os.environ.get("PAUSE_ENTRE_PUBLICACIONES", "0"))
         except ValueError:
             pausa = 0.0
-        for i in range(n):
-            payload = {
-                "cliente_id": f"cliente-{i % 50}",
-                "tipo_seguro": tipos[i % len(tipos)],
-                "valor_asegurado": 1000.0 + (i % 100) * 250.0,
-                "modo": "async",
-            }
-            response = requests.post(f"{COTIZACION_URL}/cotizaciones",
-                                     json=payload, timeout=10)
-            response.raise_for_status()
-            if pausa > 0 and i < n - 1:
-                time.sleep(pausa)
-        published = n
 
-        self.state["phase"] = "acumulando"
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            depth = try_queue_depth()
-            if depth is not None and depth >= published:
-                break
-            time.sleep(0.5)
+        report = {}
+        for arm in self.arms:
+            arm_report = (self._run_sync if arm == "sync" else self._run_async)(pausa)
+            if arm_report is None:
+                return  # requires_manual / error ya seteado en self.state
+            report[arm] = arm_report
 
-        self.state["phase"] = "reintegrando_suscripcion"
-        start_result = start_suscripcion()
-        if not start_result["ok"]:
-            self.state["status"] = "requires_manual"
-            self.state["error"] = "No se pudo reiniciar Suscripción automáticamente"
-            self.state["manual"] = start_result.get("manual", MANUAL_START)
-            self.state["finished_at"] = datetime.now(timezone.utc).isoformat()
-            return
-
-        self.state["phase"] = "drenando"
-        deadline = time.time() + 300
-        while time.time() < deadline:
-            depth = try_queue_depth()
-            if depth == 0:
-                break
-            time.sleep(0.25)
-        # margen para acks finales
-        time.sleep(0.5)
-
-        self.state["phase"] = "generando_reporte"
-        report = self._report(published, baseline)
+        self._phase(None, "generando_reporte")
+        report["verdict"] = self._verdict(report)
         self.state["report"] = report
         self.state["status"] = "done"
         self.state["finished_at"] = datetime.now(timezone.utc).isoformat()
 
-    def _processed_now(self):
-        audit_data = evento_audit()
-        if audit_data is not None:
-            return audit_data["processed"]
-        stats = _get_json(f"{SUSCRIPCION_URL}/procesados")
-        return stats.get("procesados") if stats else 0
+    # -------------------------------------------------------- brazo sync
+    def _run_sync(self, pausa):
+        n = self.n
+        self._phase("sync", "deteniendo_suscripcion")
+        if not stop_suscripcion()["ok"]:
+            self._fail_manual("No se pudo detener Suscripción (brazo sync)", MANUAL_STOP)
+            return None
 
-    def _report(self, published, baseline):
-        audit_data = evento_audit()
-        stats = _get_json(f"{SUSCRIPCION_URL}/procesados")
-        processed_total = audit_data["processed"] if audit_data else (
-            stats.get("procesados") if stats else None
-        )
-        duplicates = stats.get("duplicados") if stats else (
-            audit_data["duplicates"] if audit_data else None
-        )
-        # procesadas en ESTA corrida
-        processed = (processed_total - baseline) if processed_total is not None else None
-        # veredicto por auditoría evento_id: los publicados en esta corrida
-        # deben estar todos presentes en EventoProcesado
-        perdidos = None
-        en_orden = None
-        if audit_data is not None and processed is not None:
-            # auditoría evento_id: todo lo publicado en esta corrida debe
-            # haber sido procesado; PK garantiza no-duplicados en tabla
-            perdidos = max(0, published - processed)
-            # orden: no verificable cross-run (ids uuid); procesados == publicados
-            # en corrida aislada implica sin pérdidas
-            en_orden = True
+        baseline = self._processed_now()
+        dup_before = _sus_duplicados()
+
+        self._phase("sync", "publicando")
+        lote = _publicar_lote(n, "sync", pausa)
+        # en sync no hay cola: lo que no se entregó al consumidor se pierde
+        encolados = try_queue_depth() or 0
+
+        self._phase("sync", "reintegrando_suscripcion")
+        if not start_suscripcion()["ok"]:
+            self._fail_manual("No se pudo reintegrar Suscripción (brazo sync)", MANUAL_START)
+            return None
+        time.sleep(1.5)  # margen para que el consumidor vuelva
+
+        procesados = max(0, self._processed_now() - baseline)
+        dup_delta = max(0, _sus_duplicados() - dup_before)
+        return self._arm_report("sync", lote, encolados, procesados, dup_delta)
+
+    # ------------------------------------------------------- brazo async
+    def _run_async(self, pausa):
+        n = self.n
+        self._phase("async", "deteniendo_suscripcion")
+        if not stop_suscripcion()["ok"]:
+            self._fail_manual("No se pudo detener Suscripción (brazo async)", MANUAL_STOP)
+            return None
+
+        baseline = self._processed_now()
+        dup_before = _sus_duplicados()
+
+        self._phase("async", "publicando")
+        lote = _publicar_lote(n, "async", pausa)
+
+        self._phase("async", "acumulando")
+        max_depth = 0
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            depth = try_queue_depth()
+            if depth is not None:
+                max_depth = max(max_depth, depth)
+                if lote["enviadas_ok"] > 0 and depth >= lote["enviadas_ok"]:
+                    break
+            time.sleep(0.5)
+
+        self._phase("async", "reintegrando_suscripcion")
+        if not start_suscripcion()["ok"]:
+            self._fail_manual("No se pudo reintegrar Suscripción (brazo async)", MANUAL_START)
+            return None
+
+        self._phase("async", "drenando")
+        deadline = time.time() + 300
+        while time.time() < deadline:
+            if try_queue_depth() == 0:
+                break
+            time.sleep(0.25)
+        time.sleep(0.5)  # margen para acks finales
+
+        procesados = max(0, self._processed_now() - baseline)
+        dup_delta = max(0, _sus_duplicados() - dup_before)
+        return self._arm_report("async", lote, max_depth, procesados, dup_delta)
+
+    # ------------------------------------------------------------ report
+    def _arm_report(self, arm, lote, encolados, procesados, duplicados):
+        latencias = lote["latencias"]
+        # sync: la referencia es todo lo que intentó el cliente (nada se encola)
+        # async: la referencia es lo que el broker aceptó (enviadas_ok)
+        referencia = lote["enviadas_ok"] if arm == "async" else self.n
+        perdidos = max(0, referencia - procesados)
         return {
-            "publicadas": published,
-            "procesadas": processed,
-            "procesadas_total": processed_total,
+            "operaciones_cliente": self.n,
+            "enviadas_ok": lote["enviadas_ok"],
+            "errores_cliente": lote["errores_cliente"],
+            "encolados_durante_caida": encolados,
+            "procesados_reintegrar": procesados,
             "perdidos": perdidos,
-            "duplicados": duplicates,
-            "en_orden": en_orden,
-            "queue_depth": try_queue_depth(),
-            "verdict": {
-                "cero_perdidos": perdidos == 0,
-                "en_orden": bool(en_orden),
+            "duplicados": duplicados,
+            "latencia_ms": {
+                "p50": _percentile(latencias, 50),
+                "p95": _percentile(latencias, 95),
+                "max": round(max(latencias), 1) if latencias else None,
             },
         }
+
+    def _verdict(self, report):
+        sync_r = report.get("sync")
+        async_r = report.get("async")
+        verdict = {}
+        if async_r is not None:
+            verdict["broker_enmascara_falla"] = (
+                async_r["errores_cliente"] == 0 and async_r["perdidos"] == 0
+            )
+        if sync_r is not None:
+            verdict["sync_propaga_falla"] = sync_r["errores_cliente"] > 0
+        if sync_r is not None and async_r is not None:
+            ok = verdict.get("broker_enmascara_falla") and verdict.get("sync_propaga_falla")
+            verdict["recomendacion"] = (
+                "Adoptar el broker asíncrono: desacopla la falla del consumidor "
+                "del cliente (0 errores, 0 perdidos) frente al conector síncrono."
+                if ok else
+                "Resultado no concluyente — revisar durabilidad de la cola, "
+                "ack manual y el estado de los servicios."
+            )
+        return verdict
 
 
 _runner = None
@@ -343,12 +505,16 @@ def experimento_iniciar():
     n = body.get("n", DEFAULT_N)
     if not isinstance(n, int) or n < 1 or n > 10000:
         return jsonify({"ok": False, "error": "n debe ser un entero 1..10000"}), 400
+    modo = body.get("modo", "compare")
+    arms_by_modo = {"compare": ["sync", "async"], "sync": ["sync"], "async": ["async"]}
+    if modo not in arms_by_modo:
+        return jsonify({"ok": False, "error": "modo debe ser compare|sync|async"}), 400
     with _runner_lock:
         if _runner is not None and _runner.is_alive():
             return jsonify({"ok": False, "error": "experimento ya en curso"}), 409
-        _runner = ExperimentRunner(n)
+        _runner = ExperimentRunner(n, arms_by_modo[modo])
         _runner.start()
-    return jsonify({"ok": True, "n": n})
+    return jsonify({"ok": True, "n": n, "modo": modo})
 
 
 @app.get("/api/experimento/estado")
