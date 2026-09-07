@@ -3,7 +3,6 @@
    No simulated counters. */
 
 const POLL_MS = 400;
-const DOT_MAX = 12; // max dots rendered per track
 
 const $ = (id) => document.getElementById(id);
 
@@ -83,11 +82,6 @@ function renderEstado(estado) {
   const pct = estado.queue_depth === null ? 0 : Math.min(100, (estado.queue_depth / denom) * 100);
   $("queue-fill").style.width = pct + "%";
 
-  // animation dots: accumulate track1 while published > processed deltas;
-  // track2 dots driven by drain delta (depth decrease).
-  renderDots("dots-1", estado.publicadas, estado.queue_depth);
-  renderDots("dots-2", estado.queue_depth, estado.procesadas);
-
   // animaciones de actividad por nodo (publicando/relay/consumiendo/caído)
   animateActivity(estado);
 
@@ -128,29 +122,6 @@ function renderEstado(estado) {
   }
 }
 
-function renderDots(trackId, produced, consumed) {
-  const container = $(trackId);
-  container.innerHTML = "";
-  if (produced === null || consumed === null) return;
-  const inflight = Math.max(0, produced - consumed);
-  const count = Math.min(DOT_MAX, inflight);
-  for (let i = 0; i < count; i++) {
-    const dot = document.createElement("div");
-    dot.className = "dot";
-    // stagger dots across the track; they accumulate as inflight grows
-    dot.style.left = 8 + (i / Math.max(1, DOT_MAX - 1)) * 80 + "%";
-    dot.style.animationDelay = (i * 0.12) + "s";
-    container.appendChild(dot);
-  }
-}
-
-// dots glide subtly via CSS animation
-const style = document.createElement("style");
-style.textContent = `
-  .dot { animation: dotpulse 1.2s ease-in-out infinite; }
-  @keyframes dotpulse { 0%,100% { transform: translateY(-2px); opacity: .7; }
-                        50% { transform: translateY(2px); opacity: 1; } }`;
-document.head.appendChild(style);
 
 // ------------------------------------------------------------ experimento
 async function iniciarExperimento() {
